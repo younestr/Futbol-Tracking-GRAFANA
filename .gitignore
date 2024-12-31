@@ -1,0 +1,9 @@
+# Ignore the YOLO model file
+yolov8x.pt
+training/yolov5xu.pt
+
+# Ignore the models subfolder
+models/
+
+# ignoring training files
+training/
