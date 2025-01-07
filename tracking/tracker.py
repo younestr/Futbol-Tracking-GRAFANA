@@ -4,9 +4,10 @@ import pickle
 import os
 import sys 
 sys.path.append('../')
-from utils import get_bbox_width, get_center_of_bbox
+from utils import get_bbox_width, get_center_of_bbox, get_foot_position
 import cv2
 import numpy as np
+import pandas as pd 
 
 class Tracker:
     def __init__(self, model_path):
@@ -166,8 +167,38 @@ class Tracker:
 
         return frame
 
+    def draw_team_ball_control(self, frame, frame_num, team_ball_control):
+        # semi-transparent rectangle
+        overlay = frame.copy() # helps with transparency by drawing on the overlay
+        cv2.rectangle(overlay,
+                      (1350,850), # positions
+                      (1900,970),
+                      (255,255,255), # white
+                      -1) # filled
+        alpha = 0.4 # transparency factor
+        cv2.addWeighted(overlay,
+                        alpha,
+                        frame,
+                        1-alpha,
+                        0,
+                        frame)
+        
+        # calculating percetange 
+        team_ball_control_till_frame = team_ball_control[:frame_num+1]
 
-    def draw_annotations(self,video_frames,tracks):
+        # % of time each team had the ball
+        team1_num_frames = team_ball_control_till_frame[team_ball_control_till_frame==1].shape[0] # numpy list for team 1
+        team2_num_frames = team_ball_control_till_frame[team_ball_control_till_frame==2].shape[0] # numpy list for team 1
+
+        team_1 = team1_num_frames / (team1_num_frames + team2_num_frames)
+        team_2 = team2_num_frames / (team1_num_frames + team2_num_frames)
+
+        cv2.putText(frame, f"Team 1 Possession :{team_1*100:.2f}%", (1400,900), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 3)
+        cv2.putText(frame, f"Team 2 Possession :{team_2*100:.2f}%", (1400,950), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 3)
+
+        return frame 
+    
+    def draw_annotations(self,video_frames,tracks, team_ball_control):
         output_video_frames=[]
         
         for frame_num,frame in enumerate(video_frames):
@@ -181,7 +212,12 @@ class Tracker:
             for track_id , player in player_dict.items():
                 color = player.get("team_color",(0,0,255)) # get team color , if not take red 
                 frame = self.draw_ellipse(frame,player["bbox"], color, track_id) # red
-            
+
+                if player.get("has_ball", False):
+                    frame = self.draw_triangle(frame,
+                                               player["bbox"],
+                                               (0,0,255)) # red
+
             # draw referees
             for track_id , referee in referee_dict.items():
                 frame = self.draw_ellipse(frame,referee["bbox"], (0,255,255)) # yellow
@@ -189,8 +225,47 @@ class Tracker:
             # draw ball
             for track_id , ball in ball_dict.items():
                 frame = self.draw_triangle(frame,ball["bbox"], (0,255,0)) # green
+            
+            # draw block for team possession
+            frame = self.draw_team_ball_control(frame, frame_num, team_ball_control)
 
             # draw id under ellipse of player
             output_video_frames.append(frame)
         
         return output_video_frames
+
+    def interpolate_ball_positions(self, ball_positions):
+        """
+        Interpolates missing ball positions to fill gaps in the tracking data.
+
+        Args:
+            ball_positions (list): List of ball position dictionaries. Each dictionary
+                                   corresponds to a frame and contains 'bbox' as the bounding box
+                                   of the ball or an empty list if the ball is missing.
+
+        Returns:
+            list: List of interpolated ball positions with gaps filled.
+        """
+        # conversion to df
+        ball_positions = [x.get(1,{}).get('bbox',[]) for x in ball_positions] # getting the 1st track id ( if not get empty dict) and bbox ( if not get empty list)
+        df_ball_positions = pd.DataFrame(ball_positions, columns=['x1','y1','x2','y2'])
+
+        # interpolate missing values ( missing ball tracks )
+        df_ball_positions = df_ball_positions.interpolate() # filling gaps lineraly
+        df_ball_positions = df_ball_positions.bfill() # for first frames  (leading NaN values)
+
+        # deconversion 
+        ball_positions = [{1: {"bbox":x}} for x in df_ball_positions.to_numpy().tolist()]
+
+        return ball_positions
+
+    def add_position_to_tracks(sekf,tracks):
+        for object, object_tracks in tracks.items():
+            for frame_num, track in enumerate(object_tracks):
+                for track_id, track_info in track.items():
+                    bbox = track_info['bbox']
+                    if object == 'ball':
+                        position= get_center_of_bbox(bbox)
+                    else:
+                        position = get_foot_position(bbox)
+                    tracks[object][frame_num][track_id]['position'] = position      
